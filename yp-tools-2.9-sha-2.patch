@@ -1,0 +1,130 @@
+diff -up yp-tools-2.9/src/yppasswd.c_old yp-tools-2.9/src/yppasswd.c
+--- yp-tools-2.9/src/yppasswd.c_old	2009-03-03 15:23:49.000000000 +0100
++++ yp-tools-2.9/src/yppasswd.c	2009-03-04 12:39:34.000000000 +0100
+@@ -475,7 +475,8 @@ main (int argc, char **argv)
+ {
+   char *s, *progname, *domainname = NULL, *user = NULL, *master = NULL;
+   int f_flag = 0, l_flag = 0, p_flag = 0, error, status;
+-  int has_md5_passwd = 0;
++  int hash_id = DES;
++  char rounds[11] = "\0"; /* max length is '999999999$' */
+   struct yppasswd yppwd;
+   struct passwd *pwd;
+   CLIENT *clnt;
+@@ -680,7 +681,18 @@ main (int argc, char **argv)
+       strcpy (cp, pwd->pw_name);
+ 
+       if (strncmp(pwd->pw_passwd, "$1$", 3) == 0)
+-	has_md5_passwd = 1;
++	hash_id = MD5;
++
++      if (strncmp(pwd->pw_passwd, "$5$", 3) == 0)
++        hash_id = SHA_256;
++
++      if (strncmp(pwd->pw_passwd, "$6$", 3) == 0)
++        hash_id = SHA_512;
++
++      /* Preserve 'rounds=<N>$' (if present) in case of SHA-2 */
++      if (hash_id == SHA_256 || hash_id == SHA_512)
++        if (strncmp(pwd->pw_passwd + 3, "rounds=", 7) == 0)
++          strncpy(rounds, pwd->pw_passwd + 10, strcspn(pwd->pw_passwd + 10, "$") + 1);
+ 
+       /* We can't check the password with shadow passwords enabled. We
+        * leave the checking to yppasswdd */
+@@ -693,15 +705,23 @@ main (int argc, char **argv)
+ 	  /* Some systems (HPU/X) store the password aging info after
+ 	   * the password (with a comma to separate it). To support
+ 	   * this we cut the password after the first invalid char
+-	   * after the normal 13 ones. We can't cut at the first
+-	   * invalid char, since MD5 uses $ in the first char.
++	   * after the normal 13 ones - in case of MD5 (and DES).
++	   * We can't cut at the first invalid char, since MD5
++	   * uses $ in the first char. In case of SHA-2 we are looking
++	   * for first invalid char after the 38 ones.
+ 	   */
+-	  if (passwdlen > 13)
+-	    passwdlen = 13 + strspn(pwd->pw_passwd + 13,
++	  if (passwdlen > 13 && (hash_id == DES || hash_id == MD5))
++            passwdlen = 13 + strspn(pwd->pw_passwd + 13,
+ 				    "abcdefghijklmnopqrstuvwxyz"
+ 				    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+ 				    "0123456789./");
+ 
++          if (passwdlen > 38 && (hash_id == SHA_256 || hash_id == SHA_512))
++            passwdlen = 38 + strspn(pwd->pw_passwd + 38,
++                                    "abcdefghijklmnopqrstuvwxyz"
++                                    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
++                                    "0123456789./");
++
+ 	  sane_passwd = alloca (passwdlen + 1);
+ 	  strncpy (sane_passwd, pwd->pw_passwd, passwdlen);
+ 	  sane_passwd[passwdlen] = 0;
+@@ -719,7 +739,7 @@ main (int argc, char **argv)
+ #ifdef USE_CRACKLIB
+       char *error_msg;
+ #endif /* USE_CRACKLIB */
+-      char *buf, salt[12], *p = NULL;
++      char *buf, salt[37], *p = NULL;
+       int tries = 0;
+ 
+       buf = (char *) malloc (129);
+@@ -771,15 +791,37 @@ main (int argc, char **argv)
+ 	    }
+ 	}
+ 
+-      if (!has_md5_passwd)
+-	create_random_salt (salt, 2);
+-      else
+-	{
+-	  /* The user already had a MD5 password, so it's safe to
+-	   * use a MD5 password again */
+-	  strcpy (salt, "$1$");
+-	  create_random_salt (salt+3, 8);
+-	}
++      switch (hash_id)
++        { 
++          case DES:
++            create_random_salt (salt, 2);
++            break;
++
++          case MD5:
++            /* The user already had a MD5 password, so it's safe to
++             * use a MD5 password again */
++            strcpy (salt, "$1$");
++            create_random_salt (salt+3, 8);
++            break;
++
++          case SHA_256:
++          case SHA_512:
++            /* The user already had a SHA-2 password, so it's safe to
++             * use a SHA-2 password again */
++            snprintf(salt, 4, "$%d$", hash_id);
++            if (strlen(rounds) != 0)
++              {
++                strcpy (salt+3, "rounds=");
++                strcpy (salt+3+7, rounds);
++                create_random_salt (salt+3+7+strlen(rounds), 16);
++              }
++            else
++              create_random_salt (salt+3, 16);
++
++            break;
++          default:
++            break;
++        }      
+ 
+       yppwd.newpw.pw_passwd = strdup (crypt (buf, salt));
+     }
+diff -up yp-tools-2.9/src/yppasswd.h_old yp-tools-2.9/src/yppasswd.h
+--- yp-tools-2.9/src/yppasswd.h_old	2009-03-04 10:49:41.000000000 +0100
++++ yp-tools-2.9/src/yppasswd.h	2009-03-04 11:16:41.000000000 +0100
+@@ -46,4 +46,9 @@ typedef struct yppasswd yppasswd;
+ extern  bool_t xdr_xpasswd (XDR *, xpasswd*);
+ extern  bool_t xdr_yppasswd (XDR *, yppasswd*);
+ 
++#define DES 0
++#define MD5 1
++#define SHA_256 5
++#define SHA_512 6
++
+ #endif /* !__YPPASSWD_H__ */
